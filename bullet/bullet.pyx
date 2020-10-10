@@ -197,6 +197,7 @@ cdef extern from "btBulletDynamicsCommon.h":
 
         int getActivationState()
         void setActivationState(int newState)
+        void activate()
 
         int getCollisionFlags()
         void setCollisionFlags(int flags)
@@ -206,6 +207,10 @@ cdef extern from "btBulletDynamicsCommon.h":
 
     cdef int _CF_NO_CONTACT_RESPONSE "btCollisionObject::CF_NO_CONTACT_RESPONSE"
     cdef int _CF_CUSTOM_MATERIAL_CALLBACK "btCollisionObject::CF_CUSTOM_MATERIAL_CALLBACK"
+
+    cdef cppclass btCollisionObjectWrapper:
+        btCollisionObjectWrapper()
+        btCollisionObject* getCollisionObject()
 
 
     cdef cppclass btRigidBody(btCollisionObject)
@@ -447,6 +452,7 @@ cdef extern from "btBulletCollisionCommon.h":
 
         btMotionState* getMotionState()
 
+        void setGravity(btVector3 gravity)
         void setAngularFactor(btScalar angFac)
         btScalar getAngularDamping()
         btScalar getAngularSleepingThreshold()
@@ -807,9 +813,17 @@ cdef extern from "BulletCollision/NarrowPhaseCollision/btManifoldPoint.h":
     cdef cppclass btManifoldPoint:
         pass
 
+cdef extern from "BulletCollision/CollisionDispatch/btCollisionObjectWrapper.h":
+
+    cdef cppclass const_btCollisionObjectWrapper:
+        # const_btCollisionObjectWrapper()
+        btCollisionObject & getCollisionObject()
+
+    ctypedef btCollisionObjectWrapper const_btCollisionObjectWrapper "const btCollisionObjectWrapper"
+
 cdef extern from "BulletCollision/CollisionDispatch/btManifoldResult.h":
-    ctypedef btCollisionObject const_btCollisionObject "const btCollisionObject"
-    cdef bool (*gContactAddedCallback)(btManifoldPoint &cp, const_btCollisionObject *colObj0, int partId0, int index0, const_btCollisionObject *colObj1, int partId1, int index1)
+    cdef bool (*gContactAddedCallback)(btManifoldPoint &cp, const_btCollisionObjectWrapper *colObjWrap0, int partId0, int index0, const_btCollisionObjectWrapper *colObjWrap1, int partId1, int index1)
+
 
 
 # Forward declare some things because of circularity in the API.
@@ -1143,7 +1157,18 @@ cdef class Matrix3x3:
         cdef Matrix3x3 m = Matrix3x3()
         m.thisptr[0] = self.thisptr.inverse()
         return m
-                        
+
+    def mul_vec3(self, Vector3 vec not None):
+        """
+        Tranform a vector with a matrix.
+        Returns a new Vector3.
+        """
+        cdef btVector3 bt_vec = vec.to_bt()
+
+        return Vector3(self.thisptr.getRow(0).dot(bt_vec),
+                       self.thisptr.getRow(1).dot(bt_vec),
+                       self.thisptr.getRow(2).dot(bt_vec))
+
 
 
 cdef class CollisionShape:
@@ -1319,8 +1344,7 @@ cdef class IndexedMesh:
     cdef btIndexedMesh* thisptr
 
     cdef PHY_ScalarType _dtypeToScalarType(self, numpy.ndarray array):
-        cdef char *dname = array.dtype.char
-        cdef char dtype = dname[0]
+        cdef char dtype = ord(array.dtype.char)
 
         if dtype == 'f':
             return PHY_FLOAT
@@ -1722,6 +1746,9 @@ cdef class CollisionObject:
         """
         self.thisptr.setActivationState(newState)
 
+    def activate(self):
+        self.thisptr.activate()
+
     def getCollisionFlags(self):
         return self.thisptr.getCollisionFlags()
 
@@ -2076,6 +2103,11 @@ cdef class RigidBody(CollisionObject):
         cdef btVector3 impulse = btVector3(i.x, i.y, i.z)
         body.applyCentralImpulse(impulse)
 
+    def setGravity(self, Vector3 i not None):
+        """Set gravity for this RigidBody. """
+        cdef btRigidBody* body = <btRigidBody*>self.thisptr
+        cdef btVector3 gravity = btVector3(i.x, i.y, i.z)
+        body.setGravity(gravity)
 
     def applyImpulse(self, Vector3 i not None, Vector3 relativePosition not None):
         """
@@ -3792,7 +3824,9 @@ cdef class RotationalLimitMotor:
             self.thisptr.m_accumulatedImpulse = value                                                
 
 
-cdef bool ContactCallback(btManifoldPoint &cp, const_btCollisionObject *colObj0, int partId0, int index0, const_btCollisionObject *colObj1, int partId1, int index1):
+cdef bool ContactCallback(btManifoldPoint &cp, const_btCollisionObjectWrapper *colObjWrap0, int partId0, int index0, const_btCollisionObjectWrapper *colObjWrap1, int partId1, int index1):
+    cdef const btCollisionObject* colObj0 = (colObjWrap0.getCollisionObject())
+    cdef const btCollisionObject* colObj1 = (colObjWrap1.getCollisionObject())
     cdef CollisionObject obj0, obj1
     cdef bool result = True
     duplicate = False
@@ -3800,10 +3834,10 @@ cdef bool ContactCallback(btManifoldPoint &cp, const_btCollisionObject *colObj0,
         obj0 = <CollisionObject>(colObj0.getUserPointer())
         obj1 = <CollisionObject>(colObj1.getUserPointer())
         if obj0.contact_callback and obj0.contact_callback_filter_mask & obj1.contact_callback_filter_group:
-            obj0.contact_callback(obj1, duplicate)
+            obj0.contact_callback(obj1, obj0, duplicate)
             duplicate = True
         if obj1.contact_callback and obj1.contact_callback_filter_mask & obj0.contact_callback_filter_group:
-            obj1.contact_callback(obj0, duplicate)
+            obj1.contact_callback(obj0, obj1, duplicate)
     return result
 
 
